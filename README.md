@@ -13,9 +13,8 @@ stream events.
 
 License: MIT | ReShade: 5.0+ | Platform: Windows | Streamerbot: Compatible
 
-===============================================================================
+
                               KEY FEATURES
-===============================================================================
 
 🌐 TCP Server
 - Lightweight server listening on configurable port (default: 7777)
@@ -38,9 +37,9 @@ License: MIT | ReShade: 5.0+ | Platform: Windows | Streamerbot: Compatible
 🛡️ Robust Error Handling
 - Graceful handling of connection issues and network problems
 
-===============================================================================
+
                               USE CASES
-===============================================================================
+
 
 Streaming & Content Creation:
 - Audience Interaction: Let viewers control visual effects via chat commands
@@ -54,9 +53,9 @@ Automation & Integration:
 - Game Integration: Effects triggered by in-game events
 - Multi-App Control: Coordinate effects across multiple applications
 
-===============================================================================
+
                              INSTALLATION
-===============================================================================
+
 
 Prerequisites:
 - Windows 10/11
@@ -73,9 +72,9 @@ Installation Steps:
 5. Navigate to the "StreamerbotControl v1.1" tab
 6. Click "Start Server" to begin listening for connections
 
-===============================================================================
+
                          STREAMERBOT INTEGRATION
-===============================================================================
+
 
 Basic Setup:
 1. Create a new Action in Streamerbot
@@ -162,9 +161,9 @@ switch(rewardName.ToLower())
 }
 ```
 
-===============================================================================
+
                             COMMAND REFERENCE
-===============================================================================
+
 
 Command Format:
 <ACTION> <technique_name>
@@ -186,9 +185,8 @@ Effect Name Matching:
 - Partial Match: TOGGLE Blur (matches any technique containing "Blur")
 - Case Insensitive: Commands and effect names are case-insensitive
 
-===============================================================================
                              CONFIGURATION
-===============================================================================
+
 
 Network Settings:
 - Port: Default 7777 (configurable in ReShade overlay)
@@ -207,9 +205,9 @@ Advanced Options:
 - Buffer Size: 1024 bytes per command
 - Log Retention: 100 most recent entries
 
-===============================================================================
+
                       MONITORING & DIAGNOSTICS
-===============================================================================
+
 
 Server Status Indicators:
 - 🟢 Running (Healthy): Server active and responsive
@@ -230,9 +228,9 @@ Health Monitoring:
 - Command Statistics: Total commands received counter
 - Restart Tracking: Failed restart attempt counting
 
-===============================================================================
+
                             TROUBLESHOOTING
-===============================================================================
+
 
 Common Issues:
 
@@ -265,9 +263,8 @@ Debug Steps:
 4. Try Manual Restart using the "Restart Server" button
 5. Verify Effect Names using "Show Available Techniques"
 
-===============================================================================
+
                       ALTERNATIVE CLIENT APPLICATIONS
-===============================================================================
 
 While designed for Streamerbot, the TCP interface works with any application:
 
@@ -300,31 +297,30 @@ telnet localhost 7777
 ENABLE ChromaticAberration
 
 
-===============================================================================
+
                                LICENSE
-===============================================================================
+
 
 This project is licensed under the MIT License
 
-===============================================================================
+
                            ACKNOWLEDGMENTS
-===============================================================================
+
 
 - Streamerbot Community: For inspiration and testing
 - ReShade Developers: For the excellent addon API
 - Streaming Community: For creative use case ideas
 
-===============================================================================
+
                                SUPPORT
-===============================================================================
+
 
 - Issues: Use the GitHub issue tracker
 - Feature Requests: Open a discussion or issue
 - Integration Help: Check the examples or ask in discussions
 
-===============================================================================
+
 
 Made with ❤️ by LonelyViper
 
 
-===============================================================================
