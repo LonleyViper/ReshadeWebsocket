@@ -37,7 +37,7 @@ struct LogEntry {
 struct AddonState {
     // Network state
     std::atomic<bool> server_running{ false };
-    std::atomic<bool> should_be_running{ false };  // NEW: Track intended state
+    std::atomic<bool> should_be_running{ false };  // NEW: Track intended states
     std::unique_ptr<std::thread> server_thread;
     std::unique_ptr<std::thread> monitor_thread;   // NEW: Monitoring thread
     SOCKET server_socket = INVALID_SOCKET;
