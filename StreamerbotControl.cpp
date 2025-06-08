@@ -19,10 +19,10 @@
 
 // Addon info
 constexpr auto ADDON_NAME = "StreamerbotControl";
-constexpr auto ADDON_VERSION = "1.0";
+constexpr auto ADDON_VERSION = "1.1";
 constexpr auto ADDON_AUTHOR = "LonelyViper";
 constexpr auto ADDON_COPYRIGHT = "Copyright (c) 2025 LonelyLabs";
-constexpr auto ADDON_DESCRIPTION = "Control ReShade effects via TCP commands from Streamerbot";
+constexpr auto ADDON_DESCRIPTION = "Control ReShade effects via TCP commands from Streamerbot with auto-restart";
 constexpr auto BUILD_DATE = __DATE__ " " __TIME__;
 constexpr int DEFAULT_PORT = 7777;
 constexpr size_t BUFFER_SIZE = 1024;
@@ -37,7 +37,9 @@ struct LogEntry {
 struct AddonState {
     // Network state
     std::atomic<bool> server_running{ false };
+    std::atomic<bool> should_be_running{ false };  // NEW: Track intended state
     std::unique_ptr<std::thread> server_thread;
+    std::unique_ptr<std::thread> monitor_thread;   // NEW: Monitoring thread
     SOCKET server_socket = INVALID_SOCKET;
     int port = DEFAULT_PORT;
     std::mutex socket_mutex;
@@ -46,6 +48,18 @@ struct AddonState {
     std::atomic<bool> client_connected{ false };
     std::string client_address = "None";
     std::atomic<int> commands_received{ 0 };
+    std::atomic<int> restart_count{ 0 };          // NEW: Track restart attempts
+
+    // Auto-restart settings
+    bool auto_restart_enabled = true;             // NEW: Enable/disable auto-restart
+    int restart_delay_seconds = 5;               // NEW: Delay between restart attempts
+    int max_restart_attempts = 10;               // NEW: Max consecutive restart attempts
+    std::chrono::steady_clock::time_point last_restart_attempt; // NEW: Track last restart
+    std::chrono::steady_clock::time_point last_successful_start; // NEW: Track successful starts
+
+    // Health monitoring
+    std::chrono::steady_clock::time_point last_heartbeat;       // NEW: Track server health
+    std::atomic<bool> server_healthy{ true };    // NEW: Server health status
 
     // ReShade state
     reshade::api::effect_runtime* current_runtime{ nullptr };
@@ -57,6 +71,7 @@ struct AddonState {
     bool show_technique_list = false;
     bool auto_scroll_log = true;
     char port_buffer[16] = "7777";
+    bool show_advanced_settings = false;          // NEW: Show advanced restart settings
 
     // Command processing
     std::chrono::steady_clock::time_point last_command_time;
@@ -172,6 +187,18 @@ void ProcessCommand(const std::string& command) {
     }
 }
 
+// NEW: Clean shutdown of server
+void CleanShutdownServer() {
+    if (g_state->server_socket != INVALID_SOCKET) {
+        closesocket(g_state->server_socket);
+        g_state->server_socket = INVALID_SOCKET;
+    }
+    g_state->server_running = false;
+    g_state->server_healthy = false;
+    g_state->client_connected = false;
+    g_state->client_address = "None";
+}
+
 // TCP Server thread
 void ServerThread() {
     AddLog("Server thread started", ImVec4(0.0f, 1.0f, 0.0f, 1.0f));
@@ -180,6 +207,7 @@ void ServerThread() {
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         AddLog("WSAStartup failed", ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
+        g_state->server_healthy = false;
         return;
     }
 
@@ -188,6 +216,7 @@ void ServerThread() {
     if (g_state->server_socket == INVALID_SOCKET) {
         AddLog("Socket creation failed", ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
         WSACleanup();
+        g_state->server_healthy = false;
         return;
     }
 
@@ -207,7 +236,7 @@ void ServerThread() {
 
     if (bind(g_state->server_socket, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
         AddLog("Bind failed on port " + std::to_string(g_state->port), ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
-        closesocket(g_state->server_socket);
+        CleanShutdownServer();
         WSACleanup();
         return;
     }
@@ -215,14 +244,23 @@ void ServerThread() {
     // Listen for connections
     if (listen(g_state->server_socket, SOMAXCONN) == SOCKET_ERROR) {
         AddLog("Listen failed", ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
-        closesocket(g_state->server_socket);
+        CleanShutdownServer();
         WSACleanup();
         return;
     }
 
     AddLog("Server listening on port " + std::to_string(g_state->port), ImVec4(0.0f, 1.0f, 0.0f, 1.0f));
 
-    while (g_state->server_running) {
+    // Mark server as healthy and update timestamps
+    g_state->server_healthy = true;
+    g_state->last_heartbeat = std::chrono::steady_clock::now();
+    g_state->last_successful_start = std::chrono::steady_clock::now();
+    g_state->restart_count = 0; // Reset restart count on successful start
+
+    while (g_state->server_running && g_state->should_be_running) {
+        // Update heartbeat
+        g_state->last_heartbeat = std::chrono::steady_clock::now();
+
         // Accept connections
         sockaddr_in client_addr = {};
         int client_len = sizeof(client_addr);
@@ -238,7 +276,10 @@ void ServerThread() {
 
             // Handle client
             char buffer[BUFFER_SIZE];
-            while (g_state->server_running) {
+            while (g_state->server_running && g_state->should_be_running) {
+                // Update heartbeat during active connection
+                g_state->last_heartbeat = std::chrono::steady_clock::now();
+
                 int bytes_received = recv(client_socket, buffer, BUFFER_SIZE - 1, 0);
 
                 if (bytes_received > 0) {
@@ -257,13 +298,14 @@ void ServerThread() {
                     send(client_socket, response.c_str(), (int)response.length(), 0);
                 }
                 else if (bytes_received == 0) {
-                    // Client disconnected
+                    // Client disconnected gracefully
                     break;
                 }
                 else {
                     // Check for actual error (not just non-blocking)
                     int error = WSAGetLastError();
                     if (error != WSAEWOULDBLOCK) {
+                        AddLog("Socket error: " + std::to_string(error), ImVec4(1.0f, 0.5f, 0.0f, 1.0f));
                         break;
                     }
                 }
@@ -276,28 +318,115 @@ void ServerThread() {
             closesocket(client_socket);
             AddLog("Client disconnected", ImVec4(1.0f, 0.5f, 0.0f, 1.0f));
         }
+        else {
+            // Check for socket errors that would indicate server failure
+            int error = WSAGetLastError();
+            if (error != WSAEWOULDBLOCK && error != WSAECONNABORTED) {
+                AddLog("Accept error: " + std::to_string(error), ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
+                g_state->server_healthy = false;
+                break;
+            }
+        }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    closesocket(g_state->server_socket);
+    CleanShutdownServer();
     WSACleanup();
     AddLog("Server stopped", ImVec4(1.0f, 0.5f, 0.0f, 1.0f));
 }
 
+// NEW: Server monitor and auto-restart thread
+void MonitorThread() {
+    AddLog("Monitor thread started", ImVec4(0.0f, 0.8f, 0.8f, 1.0f));
+
+    while (g_state->should_be_running) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+
+        // Check if auto-restart is enabled
+        if (!g_state->auto_restart_enabled) {
+            continue;
+        }
+
+        // Check if server should be running but isn't
+        if (g_state->should_be_running && !g_state->server_running) {
+            auto now = std::chrono::steady_clock::now();
+            auto time_since_last_restart = std::chrono::duration_cast<std::chrono::seconds>(
+                now - g_state->last_restart_attempt).count();
+
+            // Check if enough time has passed since last restart attempt
+            if (time_since_last_restart >= g_state->restart_delay_seconds) {
+                // Check if we haven't exceeded max restart attempts
+                if (g_state->restart_count < g_state->max_restart_attempts) {
+                    g_state->restart_count++;
+                    g_state->last_restart_attempt = now;
+
+                    AddLog("Auto-restarting server (attempt " + std::to_string(g_state->restart_count) +
+                        "/" + std::to_string(g_state->max_restart_attempts) + ")",
+                        ImVec4(1.0f, 1.0f, 0.0f, 1.0f));
+
+                    // Stop existing thread if it's still running
+                    if (g_state->server_thread && g_state->server_thread->joinable()) {
+                        g_state->server_thread->join();
+                    }
+
+                    // Start new server thread
+                    g_state->server_running = true;
+                    g_state->server_thread = std::make_unique<std::thread>(ServerThread);
+                }
+                else {
+                    AddLog("Max restart attempts reached. Auto-restart disabled.", ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
+                    g_state->auto_restart_enabled = false;
+                }
+            }
+        }
+
+        // Check server health (heartbeat)
+        if (g_state->server_running) {
+            auto now = std::chrono::steady_clock::now();
+            auto time_since_heartbeat = std::chrono::duration_cast<std::chrono::seconds>(
+                now - g_state->last_heartbeat).count();
+
+            // If no heartbeat for more than 30 seconds, consider server dead
+            if (time_since_heartbeat > 30) {
+                AddLog("Server heartbeat timeout - marking as unhealthy", ImVec4(1.0f, 0.5f, 0.0f, 1.0f));
+                g_state->server_healthy = false;
+
+                // Force stop the server to trigger restart
+                CleanShutdownServer();
+                if (g_state->server_thread && g_state->server_thread->joinable()) {
+                    g_state->server_thread->join();
+                }
+            }
+        }
+    }
+
+    AddLog("Monitor thread stopped", ImVec4(0.0f, 0.8f, 0.8f, 1.0f));
+}
+
 // Start server
 void StartServer() {
-    if (!g_state || g_state->server_running) return;
+    if (!g_state) return;
 
     g_state->port = std::stoi(g_state->port_buffer);
+    g_state->should_be_running = true;
     g_state->server_running = true;
+    g_state->restart_count = 0; // Reset restart count when manually started
+
+    // Start server thread
     g_state->server_thread = std::make_unique<std::thread>(ServerThread);
+
+    // Start monitor thread if not already running
+    if (!g_state->monitor_thread) {
+        g_state->monitor_thread = std::make_unique<std::thread>(MonitorThread);
+    }
 }
 
 // Stop server
 void StopServer() {
-    if (!g_state || !g_state->server_running) return;
+    if (!g_state) return;
 
+    g_state->should_be_running = false;
     g_state->server_running = false;
 
     // Close socket to unblock accept()
@@ -308,6 +437,34 @@ void StopServer() {
     if (g_state->server_thread && g_state->server_thread->joinable()) {
         g_state->server_thread->join();
     }
+
+    if (g_state->monitor_thread && g_state->monitor_thread->joinable()) {
+        g_state->monitor_thread->join();
+    }
+}
+
+// NEW: Manual restart function
+void RestartServer() {
+    if (!g_state) return;
+
+    AddLog("Manual server restart requested", ImVec4(0.0f, 1.0f, 1.0f, 1.0f));
+
+    // Stop server
+    g_state->server_running = false;
+    if (g_state->server_socket != INVALID_SOCKET) {
+        closesocket(g_state->server_socket);
+    }
+    if (g_state->server_thread && g_state->server_thread->joinable()) {
+        g_state->server_thread->join();
+    }
+
+    // Reset restart count for manual restart
+    g_state->restart_count = 0;
+
+    // Start server again
+    std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Brief pause
+    g_state->server_running = true;
+    g_state->server_thread = std::make_unique<std::thread>(ServerThread);
 }
 
 // GUI
@@ -316,10 +473,21 @@ static void OnDrawSettings(reshade::api::effect_runtime* runtime) {
     ImGui::Text("By %s", ADDON_AUTHOR);
     ImGui::Separator();
 
-    // Server controls
+    // Server status with health indicator
     ImGui::Text("Server Status: %s", g_state->server_running.load() ? "Running" : "Stopped");
+    ImGui::SameLine();
+    if (g_state->server_running) {
+        ImGui::TextColored(g_state->server_healthy ? ImVec4(0.0f, 1.0f, 0.0f, 1.0f) : ImVec4(1.0f, 0.0f, 0.0f, 1.0f),
+            g_state->server_healthy ? "(Healthy)" : "(Unhealthy)");
+    }
+
     ImGui::Text("Client: %s", g_state->client_connected.load() ? g_state->client_address.c_str() : "None");
     ImGui::Text("Commands Received: %d", g_state->commands_received.load());
+
+    // NEW: Auto-restart status
+    if (g_state->restart_count > 0) {
+        ImGui::Text("Restart Count: %d/%d", g_state->restart_count.load(), g_state->max_restart_attempts);
+    }
 
     ImGui::Separator();
 
@@ -334,6 +502,39 @@ static void OnDrawSettings(reshade::api::effect_runtime* runtime) {
         if (ImGui::Button("Stop Server")) {
             StopServer();
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Restart Server")) {
+            RestartServer();
+        }
+    }
+
+    // NEW: Auto-restart controls
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Auto-Restart Settings:");
+
+    if (ImGui::Checkbox("Enable Auto-Restart", &g_state->auto_restart_enabled)) {
+        if (g_state->auto_restart_enabled) {
+            g_state->restart_count = 0; // Reset count when re-enabling
+            AddLog("Auto-restart enabled", ImVec4(0.0f, 1.0f, 0.0f, 1.0f));
+        }
+        else {
+            AddLog("Auto-restart disabled", ImVec4(1.0f, 0.5f, 0.0f, 1.0f));
+        }
+    }
+
+    if (ImGui::Button("Show Advanced Settings")) {
+        g_state->show_advanced_settings = !g_state->show_advanced_settings;
+    }
+
+    if (g_state->show_advanced_settings) {
+        ImGui::Indent();
+        ImGui::SliderInt("Restart Delay (seconds)", &g_state->restart_delay_seconds, 1, 60);
+        ImGui::SliderInt("Max Restart Attempts", &g_state->max_restart_attempts, 1, 50);
+        if (ImGui::Button("Reset Restart Counter")) {
+            g_state->restart_count = 0;
+            AddLog("Restart counter reset", ImVec4(0.0f, 1.0f, 0.0f, 1.0f));
+        }
+        ImGui::Unindent();
     }
 
     ImGui::Separator();
@@ -437,7 +638,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID) {
 }
 
 // Metadata
-extern "C" __declspec(dllexport) const char* NAME = "StreamerbotControl v1.0";
+extern "C" __declspec(dllexport) const char* NAME = "StreamerbotControl v1.1";
 extern "C" __declspec(dllexport) const char* AUTHOR = "LonelyViper";
 extern "C" __declspec(dllexport) const char* DESCRIPTION = ADDON_DESCRIPTION;
 extern "C" __declspec(dllexport) const char* COPYRIGHT = ADDON_COPYRIGHT;
