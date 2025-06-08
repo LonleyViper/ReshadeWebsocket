@@ -48,7 +48,7 @@ struct AddonState {
     std::atomic<bool> client_connected{ false };
     std::string client_address = "None";
     std::atomic<int> commands_received{ 0 };
-    std::atomic<int> restart_count{ 0 };          // NEW: Track restart attempts
+    std::atomic<int> restart_count{ 0 };          // NEW: Track restart attempts.
 
     // Auto-restart settings
     bool auto_restart_enabled = true;             // NEW: Enable/disable auto-restart
